@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>大肥鱼 · 3D 模型查看器</title>
+<style>
+  :root {
+    --bg-panel: rgba(12, 20, 34, 0.78);
+    --bg-panel-solid: #0d1626;
+    --line: rgba(120, 190, 255, 0.22);
+    --text: #dbe9ff;
+    --text-dim: #8aa4c6;
+    --accent: #56d6ff;
+    --accent-2: #7c8cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #070c15; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  canvas { display: block; }
+
+  #app { position: fixed; inset: 0; }
+
+  .panel {
+    position: fixed;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+  }
+
+  #title { top: 18px; left: 18px; padding: 14px 18px; min-width: 236px; }
+  #title h1 {
+    margin: 0; font-size: 19px; letter-spacing: 0.5px;
+    background: linear-gradient(92deg, #7fe3ff, #a9b6ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  #title .sub { margin-top: 6px; font-size: 12px; color: var(--text-dim); line-height: 1.7; }
+  #title .tag {
+    display: inline-block; margin-top: 8px; padding: 2px 8px; font-size: 11px;
+    border: 1px solid var(--line); border-radius: 999px; color: var(--accent);
+  }
+
+  #ctrl { top: 152px; left: 18px; padding: 12px 14px; width: 194px; }
+  #ctrl .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; font-size: 13px; }
+  #ctrl .row:last-child { margin-bottom: 0; }
+  #ctrl label { cursor: pointer; user-select: none; }
+  .switch { position: relative; width: 38px; height: 21px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; cursor: pointer; border-radius: 21px;
+    background: rgba(120, 160, 210, 0.22); transition: background .18s;
+  }
+  .slider::before {
+    content: ""; position: absolute; width: 15px; height: 15px; left: 3px; top: 3px;
+    border-radius: 50%; background: #cfe3ff; transition: transform .18s;
+  }
+  input:checked + .slider { background: rgba(86, 214, 255, 0.55); }
+  input:checked + .slider::before { transform: translateX(17px); }
+
+  #hud {
+    right: 18px; bottom: 18px; padding: 9px 14px; font-size: 12px; color: var(--text-dim);
+    font-variant-numeric: tabular-nums; letter-spacing: 0.4px;
+  }
+  #hud span { color: var(--accent); }
+
+  /* 右上角常驻性能仪表：FPS + 三角面数，按帧率变色 */
+  #perf {
+    right: 18px; top: 18px; z-index: 19;
+    display: flex; flex-direction: column; gap: 7px; padding: 12px 16px;
+    font-variant-numeric: tabular-nums; letter-spacing: .5px;
+    pointer-events: none; user-select: none; min-width: 132px;
+  }
+  #perf .kv { display: flex; align-items: baseline; gap: 6px; }
+  #perf .kv b { font-size: 22px; font-weight: 700; line-height: 1; color: var(--accent); transition: color .3s; }
+  #perf .kv span { font-size: 11px; color: var(--text-dim); }
+  #perf i {
+    align-self: flex-start; padding: 2px 8px; font-size: 10px; font-style: normal;
+    color: var(--text-dim); border: 1px solid var(--line); border-radius: 999px;
+  }
+  #perf.good b { color: #6ee7a0; }
+  #perf.mid  b { color: #ffc46b; }
+  #perf.bad  b { color: #ff7a6b; }
+  #perf.bad { border-color: rgba(255, 122, 107, .4); }
+
+  #loading {
+    position: fixed; inset: 0; z-index: 20; display: flex;
+    flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    background: radial-gradient(circle at 50% 45%, #12203a 0%, #070c15 70%);
+    transition: opacity .5s ease;
+  }
+  #loading.hide { opacity: 0; pointer-events: none; }
+  #loading .ring {
+    width: 62px; height: 62px; border-radius: 50%;
+    border: 3px solid rgba(86, 214, 255, 0.18); border-top-color: var(--accent);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading .txt { font-size: 13px; color: var(--text-dim); letter-spacing: 1px; }
+  #bar { width: 210px; height: 3px; border-radius: 3px; background: rgba(120, 170, 220, 0.16); overflow: hidden; }
+  #bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
+  #err { max-width: 460px; padding: 0 20px; font-size: 13px; line-height: 1.8; color: #ffb4b4; text-align: center; display: none; }
+
+  #stick {
+    position: fixed; z-index: 15; width: 116px; height: 116px; border-radius: 50%;
+    border: 1px solid var(--line); background: rgba(12, 22, 38, 0.4);
+    display: none; pointer-events: none;
+  }
+  #stick > i {
+    position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -23px 0 0 -23px;
+    border-radius: 50%; background: rgba(86, 214, 255, 0.34);
+    border: 1px solid rgba(140, 220, 255, 0.55);
+  }
+  #toast {
+    position: fixed; left: 50%; top: 15%; transform: translateX(-50%); z-index: 18;
+    padding: 8px 16px; font-size: 13px; color: var(--text);
+    background: var(--bg-panel); border: 1px solid var(--line); border-radius: 999px;
+    opacity: 0; transition: opacity .35s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+
+  #filewarn {
+    position: fixed; inset: 0; z-index: 40; display: none;
+    background: rgba(4, 8, 14, .88); backdrop-filter: blur(6px);
+    padding: 24px; overflow: auto;
+  }
+  #filewarn.show { display: flex; align-items: center; justify-content: center; }
+  #filewarn .box {
+    max-width: 620px; background: var(--bg-panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 26px 28px; line-height: 1.75; font-size: 14px;
+  }
+  #filewarn h2 { margin: 0 0 12px; font-size: 18px; color: #ff9a6c; }
+  #filewarn p { margin: 10px 0; color: var(--text-dim); }
+  #filewarn code, #filewarn pre {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px;
+    background: rgba(255, 255, 255, .06); border-radius: 6px; color: #9fd0ff;
+  }
+  #filewarn code { padding: 2px 6px; }
+  #filewarn pre { padding: 10px 12px; margin: 8px 0; overflow-x: auto; }
+  #filewarn button {
+    margin-top: 16px; padding: 9px 20px; font-size: 14px; cursor: pointer;
+    color: var(--text); background: rgba(61, 111, 158, .3);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  #filewarn button:hover { background: rgba(61, 111, 158, .5); }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="title" class="panel">
+  <h1>大肥鱼 · DeepSake</h1>
+  <div class="sub">深海侦察兵 / 自动步枪 / 声呐扫描<br />图生 3D 模型 · three.js 实时预览</div>
+  <span class="tag">ABYSS · 缓存浅滩</span>
+</div>
+
+<div id="ctrl" class="panel">
+  <div class="row"><label for="tFollow">相机跟随</label>
+    <span class="switch"><input type="checkbox" id="tFollow" checked /><i class="slider"></i></span></div>
+  <div class="row"><label for="tGrid">显示网格</label>
+    <span class="switch"><input type="checkbox" id="tGrid" checked /><i class="slider"></i></span></div>
+  <div class="row"><label for="tWire">线框模式</label>
+    <span class="switch"><input type="checkbox" id="tWire" /><i class="slider"></i></span></div>
+  <div class="row"><label for="tPerf">高性能模式</label>
+    <span class="switch"><input type="checkbox" id="tPerf" checked /><i class="slider"></i></span></div>
+  <div class="row"><label for="tFlip">转身 180°</label>
+    <span class="switch"><input type="checkbox" id="tFlip" /><i class="slider"></i></span></div>
+</div>
+
+<div id="hud" class="panel">坐标 X <span id="hx">0.0</span> · Z <span id="hz">0.0</span> · 状态 <span id="hs">待命</span></div>
+
+<div id="perf" class="panel">
+  <div class="kv"><b id="fps">--</b><span>FPS</span></div>
+  <div class="kv"><b id="tris">--</b><span>三角面</span></div>
+  <i id="perfmode">高性能</i>
+</div>
+
+<div id="stick"><i></i></div>
+<div id="toast"></div>
+
+<!-- file:// 直接打开时的提示（ES Module + importmap 在 file 协议下会被浏览器 CORS 拦截） -->
+<div id="filewarn">
+  <div class="box">
+    <h2>需要通过本地服务器打开</h2>
+    <p>当前是 <code>file://</code> 协议，浏览器出于安全策略禁止加载 ES Module 与 GLB 文件，所以页面会白屏或报 CORS 错误。</p>
+    <p>在 <code>web/</code> 目录下执行下面任意一条命令，然后访问提示的地址：</p>
+    <pre>python3 -m http.server 8899</pre>
+    <pre>npx serve .</pre>
+    <p>然后打开 <code>http://127.0.0.1:8899/index.html</code></p>
+    <button id="filewarnClose">我已了解</button>
+  </div>
+</div>
+
+<div id="loading">
+  <div class="ring"></div>
+  <div class="txt">正在载入模型…</div>
+  <div id="bar"><i></i></div>
+  <div id="err"></div>
+</div>
+
+<script>
+// file:// 协议检测：ES Module 在 file:// 下不会执行，所以必须用普通 script 在最前面判断
+if (location.protocol === 'file:') {
+  document.getElementById('filewarn').classList.add('show');
+  addEventListener('DOMContentLoaded', () => {
+    const b = document.getElementById('filewarnClose');
+    if (b) b.addEventListener('click', () => document.getElementById('filewarn').classList.remove('show'));
+  });
+}
+</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./assets/three.module.js",
+    "three/addons/": "./assets/addons/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ---------- 基础场景 ---------- */
+const container = document.getElementById('app');
+// 45° 等距视角参数（相机沿世界 (1,1,1) 方向看向角色）
+const ISO_OFFSET = 5.0;      // 水平/垂直方向等距偏移量
+const ISO_TARGET_Y = 0.86;   // 视线目标高度（角色身高 1.72 的一半）
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070c15);
+scene.fog = new THREE.Fog(0x070c15, 34, 96);
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 200);
+// 45° 等距视角：偏移方向取世界 (1,1,1)（方位角 45°、仰角 35.26°）
+camera.position.set(ISO_OFFSET, ISO_TARGET_Y + ISO_OFFSET, ISO_OFFSET);
+
+const renderer = (() => {
+  try {
+    return new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  } catch (e) {
+    document.querySelector('#loading .ring').style.display = 'none';
+    document.querySelector('#loading .txt').textContent = '当前环境不支持 WebGL';
+    const box = document.getElementById('err');
+    box.style.display = 'block';
+    box.textContent = '请换用桌面版 Chrome / Edge 打开，并确认已开启硬件加速。';
+    throw e;
+  }
+})();
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.06;
+container.appendChild(renderer.domElement);
+
+/* ---------- 画质档位：集显/低端机吃不住 15 万面 + 2K 阴影 ----------
+   高性能模式（默认开）：pixelRatio 锁 1、阴影贴图 1024 → 帧率优先
+   关闭：pixelRatio 跟随屏幕（最高 2）、阴影贴图 2048 → 画质优先           */
+const TIERS = {
+  perf:  { pixelRatio: 1,    shadow: 1024, shadowOn: true  },
+  quality: { pixelRatio: Math.min(devicePixelRatio, 2), shadow: 2048, shadowOn: true }
+};
+let curTier = null;
+
+function applyTier(name) {
+  const t = TIERS[name];
+  if (!t || curTier === name) return;
+  curTier = name;
+  renderer.setPixelRatio(t.pixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = t.shadowOn;
+  key.castShadow = t.shadowOn;
+  if (key.shadow.map && key.shadow.mapSize.width !== t.shadow) {
+    key.shadow.map.dispose();
+    key.shadow.map = null;
+  }
+  key.shadow.mapSize.set(t.shadow, t.shadow);
+  renderer.shadowMap.needsUpdate = true;
+  const badge = document.getElementById('perfmode');
+  if (badge) badge.textContent = name === 'perf' ? '高性能' : '高画质';
+  toast(name === 'perf' ? '高性能模式：帧率优先' : '高画质模式：细节优先');
+}
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = false;         // 关闭阻尼：缩放/旋转立即到位，不做缓慢回弹
+controls.maxPolarAngle = Math.PI * 0.495;   // 不让相机钻到地面以下
+controls.minDistance = 1.2;
+controls.maxDistance = 40;          // 拉远上限（网格已放大到 120，远景不会看到边界）
+controls.zoomSpeed = 0.85;               // 滚轮缩放手感
+controls.rotateSpeed = 0.85;
+controls.target.set(0, ISO_TARGET_Y, 0);
+
+/* ---------- 灯光 ---------- */
+scene.add(new THREE.HemisphereLight(0x9dc4ff, 0x101a2b, 0.75));
+
+const key = new THREE.DirectionalLight(0xffffff, 2.05);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 1;
+key.shadow.camera.far = 34;
+key.shadow.camera.left = -7; key.shadow.camera.right = 7;
+key.shadow.camera.top = 7;   key.shadow.camera.bottom = -7;
+key.shadow.bias = -0.0006;
+key.shadow.normalBias = 0.022;
+scene.add(key);
+scene.add(key.target);          // 阴影相机跟随角色，保证任何位置都有清晰投影
+const lightOffset = new THREE.Vector3(4.5, 7.5, 3.2);
+
+const rim = new THREE.DirectionalLight(0x5ec8ff, 0.85);
+rim.position.set(-5, 3.2, -4.4);
+scene.add(rim);
+
+const fill = new THREE.PointLight(0x7c8cff, 0.5, 14, 2);
+fill.position.set(-1.6, 1.6, 3.2);
+scene.add(fill);
+
+/* ---------- 地面 + 网格 ---------- */
+const GROUND_R = 60;                              // 地面/网格半径，随相机拉远范围一起放大
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(GROUND_R, 72),
+  new THREE.MeshStandardMaterial({ color: 0x0b1424, roughness: 0.94, metalness: 0.06 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(GROUND_R * 2, 60, 0x3d6f9e, 0x1e3350);
+grid.material.transparent = true;
+grid.material.opacity = 0.55;
+scene.add(grid);
+
+// 主轴十字线，稍亮一些，方便判断朝向
+const axisMat = new THREE.LineBasicMaterial({ color: 0x59d3ff, transparent: true, opacity: 0.34 });
+const axisGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(-26, 0.012, 0), new THREE.Vector3(26, 0.012, 0),
+  new THREE.Vector3(0, 0.012, -26), new THREE.Vector3(0, 0.012, 26)
+]);
+scene.add(new THREE.LineSegments(axisGeo, axisMat));
+
+/* ---------- 声呐扫描环 ---------- */
+const pulse = new THREE.Mesh(
+  new THREE.RingGeometry(0.55, 0.72, 64),
+  new THREE.MeshBasicMaterial({ color: 0x6fe4ff, transparent: true, opacity: 0, side: THREE.DoubleSide })
+);
+pulse.rotation.x = -Math.PI / 2;
+pulse.position.y = 0.03;
+scene.add(pulse);
+let pulseT = -1;
+function firePulse() {
+  pulseT = 0;
+  toast('声呐扫描 · SONAR');
+}
+
+/* ---------- 角色 ---------- */
+const rig = new THREE.Group();      // 世界位置
+const lean = new THREE.Group();     // 前倾
+const bob = new THREE.Group();      // 上下起伏 / 呼吸
+rig.add(lean); lean.add(bob);
+
+// 「转身 180°」开关用的旋转层。姿态修正烘在模型自身（见 fitModel 上方说明），
+// 这里只做绕 Y 的整体转身，不影响已经算好的落地与居中。
+const flipper = new THREE.Group();
+bob.add(flipper);
+scene.add(rig);
+
+/* 角色模型：单张正面立绘直出的低模（14990 面 ≤ 15000 上限）。
+   注意：图生 3D 服务会把「三视图拼图」里的每一栏当成独立主体各生成一个角色，
+   旧版三只并排的模型就是这么来的。要单角色模型只能喂单栏图，
+   所以这里用 docs/08-美术资料/02-三视图参考/大肥鱼-据枪瞄准版.png 裁出的正面栏
+   （crop_single.py）直出。 */
+const MODEL_URL = './assets/dafeiyu_aim_15k.glb';
+const MODEL_LABEL = '15k · 据枪瞄准单图直出';
+const TARGET_H = 1.72;
+let model = null, wireframe = false, flipped = false;
+
+function fitModel(obj, targetHeight) {
+  // 必须在挂到父级之前调用：此时 matrixWorld === matrix，setFromObject 得到的就是
+  // 「父空间」下的包围盒（已包含自身姿态旋转），所以算出的缩放与落地偏移可以直接写进
+  // obj.scale / obj.position。若先挂到有旋转的 bob 上，世界偏移与父空间偏移就不一致了。
+  const b = new THREE.Box3().setFromObject(obj);
+  const s = new THREE.Vector3(); b.getSize(s);
+  if (!(s.y > 1e-6)) return;
+  obj.scale.setScalar(targetHeight / s.y);
+  const b2 = new THREE.Box3().setFromObject(obj);
+  const c = new THREE.Vector3(); b2.getCenter(c);
+  obj.position.set(-c.x, -b2.min.y, -c.z);
+}
+
+function applyWireframe(on) {
+  wireframe = on;
+  model && model.traverse(o => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => { if (m) m.wireframe = on; });
+  });
+}
+
+const bar = document.querySelector('#bar > i');
+const errBox = document.getElementById('err');
+const loading = document.getElementById('loading');
+
+function loadModel() {
+  loading.classList.remove('hide');
+  document.querySelector('#loading .ring').style.display = '';
+  document.querySelector('#loading .txt').textContent = '正在载入模型…';
+  errBox.style.display = 'none';
+  bar.style.width = '0%';
+
+  new GLTFLoader().load(
+    MODEL_URL,
+    gltf => {
+      model = gltf.scene;
+      model.traverse(o => {
+        if (!o.isMesh) return;
+        o.castShadow = true;
+        o.receiveShadow = true;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(m => { if (m) { m.side = THREE.FrontSide; m.envMapIntensity = 0.85; } });
+      });
+      // GLB 根节点自带 rotation =绕 X 轴 +90°（gltf.scene 的 quaternion 已含它，
+      // GLTFLoader 会自动应用），加载后模型已经是「头朝 +Y、双脚站在 y=0、正面朝 +Z」
+      // 的站立姿态—— 由 render_views.py 离线渲染六视图实测确认。
+      // 因此这里【不要】再叠任何姿态旋转，之前多叠一次就会把人放倒/躺下。
+      fitModel(model, TARGET_H);          // 必须在挂到 flipper 之前调用
+      flipper.add(model);
+      if (flipped) flipper.rotation.y = Math.PI;
+      applyWireframe(document.getElementById('tWire').checked);
+      bar.style.width = '100%';
+      setTimeout(() => loading.classList.add('hide'), 260);
+      let tris = 0;
+      model.traverse(o => {
+        if (!o.isMesh || !o.geometry) return;
+        const g = o.geometry;
+        tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
+      });
+      elTris.textContent = tris >= 1000 ? (tris / 1000).toFixed(0) + 'k' : String(Math.round(tris));
+      toast(`模型载入完成 · ${MODEL_LABEL} · ${(tris / 1000).toFixed(0)}k 面`);
+    },
+    xhr => { if (xhr.total) bar.style.width = Math.min(99, (xhr.loaded / xhr.total) * 100) + '%'; },
+    err => {
+      document.querySelector('#loading .ring').style.display = 'none';
+      document.querySelector('#loading .txt').textContent = '模型载入失败';
+      errBox.style.display = 'block';
+      errBox.textContent = '未找到 ' + MODEL_URL + '。请确认 dafeiyu_aim_15k.glb 与本页面位于同一目录（需通过 http 服务打开，不能直接双击 html）。';
+      console.error(err);
+    }
+  );
+}
+loadModel();
+
+/* ---------- 输入 ---------- */
+const keys = new Set();
+const pressed = new Map(); // 触控/虚拟摇杆
+addEventListener('keydown', e => {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
+  keys.add(e.code);
+  if (e.code === 'Space') firePulse();
+  if (e.code === 'KeyR') reset();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+
+/* 触屏摇杆 */
+const stick = document.getElementById('stick');
+const knob = stick.querySelector('i');
+let stickId = null, stickOrigin = { x: 0, y: 0 };
+const isTouch = matchMedia('(hover: none)').matches;
+if (isTouch) {
+  addEventListener('touchstart', e => {
+    const t = e.changedTouches[0];
+    if (t.clientX > innerWidth * 0.45) return;
+    stickId = t.identifier; stickOrigin = { x: t.clientX, y: t.clientY };
+    stick.style.display = 'block';
+    stick.style.left = (t.clientX - 58) + 'px';
+    stick.style.top = (t.clientY - 58) + 'px';
+    knob.style.transform = 'translate(0,0)';
+  }, { passive: true });
+  addEventListener('touchmove', e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier !== stickId) continue;
+      let dx = t.clientX - stickOrigin.x, dy = t.clientY - stickOrigin.y;
+      const len = Math.hypot(dx, dy), max = 44;
+      if (len > max) { dx = dx / len * max; dy = dy / len * max; }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      pressed.set('stick', { x: dx / max, y: dy / max });
+    }
+  }, { passive: true });
+  const end = e => {
+    for (const t of e.changedTouches) if (t.identifier === stickId) {
+      stickId = null; pressed.delete('stick');
+      stick.style.display = 'none';
+    }
+  };
+  addEventListener('touchend', end, { passive: true });
+  addEventListener('touchcancel', end, { passive: true });
+}
+
+function reset() {
+  rig.position.set(0, 0, 0);
+  camera.position.set(ISO_OFFSET, ISO_TARGET_Y + ISO_OFFSET, ISO_OFFSET);
+  controls.target.set(0, ISO_TARGET_Y, 0);
+  toast('已重置位置');
+}
+
+/* ---------- UI ---------- */
+const $ = id => document.getElementById(id);
+$('tFollow').addEventListener('change', e => toast(e.target.checked ? '相机跟随：开' : '相机跟随：关'));
+$('tGrid').addEventListener('change', e => { grid.visible = e.target.checked; });
+$('tWire').addEventListener('change', e => applyWireframe(e.target.checked));
+$('tPerf').addEventListener('change', e => applyTier(e.target.checked ? 'perf' : 'quality'));
+
+$('tFlip').addEventListener('change', e => {
+  flipped = e.target.checked;
+  flipper.rotation.y = flipped ? Math.PI : 0;
+  toast(flipped ? '模型转身 180°' : '模型朝向已复位');
+});
+
+let toastTimer = 0;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 1300);
+}
+
+/* ---------- 主循环 ---------- */
+const SPEED = 3.1, SPRINT = 6.4, LIMIT = 17;
+const dir = new THREE.Vector2();
+const targetFacing = new THREE.Vector3();
+const _f = new THREE.Vector3(), _r = new THREE.Vector3();
+const _off = new THREE.Vector3(), _look = new THREE.Vector3();
+let facing = 0, phase = 0, speedNow = 0;
+let fpsAcc = 0, fpsFrames = 0;
+const clock = new THREE.Clock();
+const elHx = $('hx'), elHz = $('hz'), elHs = $('hs');
+const elFps = $('fps'), elTris = $('tris'), perfPanel = $('perf');
+const uiFollow = $('tFollow');
+
+/* ---------- 鼠标指向：射线打到地面 y=0，角色正面始终转向该点 ---------- */
+const raycaster = new THREE.Raycaster();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);   // y = 0
+const pointerNDC = new THREE.Vector2(0, 0);
+const aimPoint = new THREE.Vector3(0, 0, 1);      // 世界坐标下的瞄准点
+let hasPointer = false;
+
+renderer.domElement.addEventListener('pointermove', e => {
+  if (e.pointerType && e.pointerType !== 'mouse') return;   // 触屏用摇杆，不参与瞄准
+  pointerNDC.x = (e.clientX / innerWidth) * 2 - 1;
+  pointerNDC.y = -(e.clientY / innerHeight) * 2 + 1;
+  hasPointer = true;
+}, { passive: true });
+
+function updateAim() {
+  raycaster.setFromCamera(pointerNDC, camera);
+  if (raycaster.ray.intersectPlane(groundPlane, aimPoint)) {
+    // 瞄准点就在角色脚下正上方时没有朝向意义，退化到相机正前方
+    const dx = aimPoint.x - rig.position.x, dz = aimPoint.z - rig.position.z;
+    if (dx * dx + dz * dz < 0.04) aimPoint.z += 1;
+  }
+}
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  /* 输入 → 方向 */
+  let ix = 0, iz = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) iz -= 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) iz += 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) ix -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) ix += 1;
+  if (pressed.has('stick')) { const s = pressed.get('stick'); ix += s.x; iz += s.y; }
+
+  dir.set(ix, iz);
+  if (dir.lengthSq() > 1) dir.normalize();
+
+  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const wish = dir.lengthSq() > 0.001;
+  const speedTarget = wish ? (sprint ? SPRINT : SPEED) : 0;
+
+  /* 相机朝向 → 移动方向（第三人称下最直觉） */
+  if (wish) {
+    camera.getWorldDirection(_f); _f.y = 0; _f.normalize();
+    _r.set(-_f.z, 0, _f.x);          // right = forward × up，别写成反向的 left
+    targetFacing.copy(_f).multiplyScalar(-dir.y).addScaledVector(_r, dir.x).normalize();
+    rig.position.addScaledVector(targetFacing, speedTarget * dt);
+  }
+
+  const rad = Math.hypot(rig.position.x, rig.position.z);
+  if (rad > LIMIT) { rig.position.x *= LIMIT / rad; rig.position.z *= LIMIT / rad; }
+
+  speedNow += (speedTarget - speedNow) * Math.min(1, dt * 9);
+  const moving = speedNow > 0.12;
+
+  /* 朝向：指针在场就直接转向（无插值），无指针（触屏）时按移动方向 */
+  updateAim();
+  const dxAim = aimPoint.x - rig.position.x, dzAim = aimPoint.z - rig.position.z;
+  const usePointer = hasPointer && (dxAim * dxAim + dzAim * dzAim) > 1e-4;
+  const want = usePointer
+    ? Math.atan2(dxAim, dzAim)
+    : (moving ? Math.atan2(targetFacing.x, targetFacing.z) : facing);
+  let diff = want - facing;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  // 鼠标指向：直接赋值，零旋转过程；触屏回退时才保留平滑
+  if (usePointer || moving) facing += usePointer ? diff : diff * Math.min(1, dt * 16);
+  rig.rotation.y = facing;
+
+  /* 待机呼吸 / 走动动画（不做待机自转，角色朝向只由输入决定） */
+  phase += dt * (moving ? 2.0 + speedNow * 1.15 : 1.7);
+  const amp = THREE.MathUtils.clamp(speedNow / SPRINT, 0, 1);
+  bob.position.y = moving ? Math.abs(Math.sin(phase)) * 0.052 * (0.45 + amp) : Math.sin(phase) * 0.011;
+  const squash = 1 + (moving ? Math.sin(phase * 2) * 0.016 * amp : Math.sin(phase) * 0.007);
+  bob.scale.set(2 - squash, squash, 2 - squash);
+  lean.rotation.x = THREE.MathUtils.lerp(lean.rotation.x, moving ? amp * 0.1 : 0, dt * 8);
+  lean.rotation.z = moving ? Math.sin(phase) * 0.035 * amp : 0;
+
+  /* 声呐环 */
+  if (pulseT >= 0) {
+    pulseT += dt;
+    const k = pulseT / 1.5;
+    if (k >= 1) { pulseT = -1; pulse.material.opacity = 0; }
+    else {
+      pulse.scale.setScalar(1 + k * 8.5);
+      pulse.material.opacity = (1 - k) * 0.75;
+    }
+  }
+
+  /* 主光与阴影相机跟随角色 */
+  key.position.copy(rig.position).add(lightOffset);
+  key.target.position.copy(rig.position);
+  key.target.updateMatrixWorld();
+
+  /* 相机（先更新，下一帧的朝向计算才能用到最新相机矩阵） */
+  if (uiFollow.checked) {
+    // 只跟随平移，不要动距离 —— 之前把相机长度往 [3.4, 7.5] 拉，
+    // 会把玩家滚轮调好的缩放一点点推回去（表现为「回弹」）。
+    _look.copy(rig.position); _look.y = ISO_TARGET_Y;
+    controls.target.lerp(_look, Math.min(1, dt * 14));
+    camera.position.add(_off.copy(_look).sub(controls.target));
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  elHx.textContent = rig.position.x.toFixed(1);
+  elHz.textContent = rig.position.z.toFixed(1);
+  elHs.textContent = sprint && moving ? '疾跑中' : moving ? '移动中' : '待命';
+
+  /* 实时 FPS（每 0.5s 刷新一次，写进右上角仪表） */
+  fpsAcc += dt; fpsFrames++;
+  if (fpsAcc >= 0.5) {
+    const fps = Math.round(fpsFrames / fpsAcc);
+    elFps.textContent = fps;
+    perfPanel.classList.toggle('good', fps >= 50);
+    perfPanel.classList.toggle('mid', fps >= 25 && fps < 50);
+    perfPanel.classList.toggle('bad', fps < 25);
+    fpsAcc = 0; fpsFrames = 0;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+applyTier($('tPerf').checked ? 'perf' : 'quality');
+tick();
+</script>
+</body>
+</html>
