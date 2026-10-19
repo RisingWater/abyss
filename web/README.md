@@ -2,6 +2,11 @@
 
 用 three.js 加载大肥鱼（DeepSake）的 3D 模型，在网格地面上自由移动。
 
+当前模型：**据枪瞄准版单角色低模，14,990 面，1.07 MB**（`assets/dafeiyu_aim_15k.glb`）。
+
+> ⚠️ 换图 / 重新生成前请先读 [「重要：三视图拼图不能用于图生3D」](#重要三视图拼图不能用于图生3d)，
+> 这是本项目最容易重复踩的坑。
+
 ## 怎么打开
 
 页面用了 ES Module + importmap + GLB 加载，**不能用 `file://` 双击打开**。原因：Chrome 在 `file://` 协议下把所有本地文件视作互不信任的源（origin 为 `null`），`<script type="module">` 和 importmap 的解析、以及 `GLTFLoader` 的 fetch/XHR 请求都会被 CORS 策略直接拒绝 —— 表现就是**白屏 + 控制台一片 CORS / Access-Control-Allow-Origin 报错**。这不是页面代码的问题，是浏览器的安全策略。
@@ -50,11 +55,11 @@ python3 server.py --host 0.0.0.0
 | 声呐扫描（地面扩散环） | `空格` |
 | 重置位置 | `R` |
 
-**界面布局**：左上角标题 + 设置开关；右上角常驻性能仪表（FPS + 三角面数 + 当前画质档位，FPS 按 ≥50 绿 / 25~50 黄 / <25 红 变色）与其下方的**模型精度切换**（150k/45k/15k/5k）；右下角坐标与状态。
+**界面布局**：左上角标题 + 设置开关；右上角常驻性能仪表（FPS + 三角面数 + 当前画质档位，FPS 按 ≥50 绿 / 25~50 黄 / <25 红 变色）；右下角坐标与状态。
 
 右上角开关：相机跟随 / 网格显示 / 线框模式 / **高性能模式** / 转身 180°。
 
-> **高性能模式**（默认开）：`pixelRatio` 锁 1、阴影贴图 1024 —— 帧率优先。关掉则用 `min(devicePixelRatio, 2)` + 2048 阴影，画面更细但更吃 GPU。模型本体 149,686 三角面 / 单材质，集显上建议保持高性能模式。
+> **高性能模式**（默认开）：`pixelRatio` 锁 1、阴影贴图 1024 —— 帧率优先。关掉则用 `min(devicePixelRatio, 2)` + 2048 阴影，画面更细但更吃 GPU。
 >
 > HUD 状态栏实时显示 FPS（每 0.5s 刷新），卡顿时先看这个数字判断是 GPU 还是页面逻辑瓶颈。
 
@@ -67,7 +72,7 @@ python3 server.py --host 0.0.0.0
 > **缩放不回弹**：相机跟随只平移 target，不干预相机到 target 的距离（早期版本会把距离往 [3.4, 7.5] 拉，把滚轮调好的缩放推回去）。
 手机上会自动出现左半屏虚拟摇杆。
 
-> 「转身 180°」是因为图生3D 模型的正面朝向不固定，若发现角色是倒着走的，点一下这个开关即可。
+> 「转身 180°」开关用于手动反转朝向。当前模型实测正面朝 +Z、朝向正确，正常不需要点；换新模型后如果发现角色是倒着走的，点一下即可。
 
 ## 目录结构
 
@@ -75,63 +80,74 @@ python3 server.py --host 0.0.0.0
 web/
 ├── index.html              页面本体（场景/光照/输入/动画都在这里）
 ├── server.py               本地静态服务器（python3 server.py，控制台打印网址）
-├── gen_model.py            图生3D 调用包装（提交+轮询+下载）
-├── fetch_result.py         按 job_id 取回模型产物
+├── crop_single.py          立绘切栏：按空白列裁出单角色面板（建模样输入）
+├── glb_info.py             GLB 体检：面数/根变换/bbox/贴图尺寸，超 15000 面 exit 1
+├── render_views.py         离线光栅器渲染六视图，无 GPU 环境确认朝向用
+├── gen_model2.py           图生3D 调用包装（可指定面数，提交+轮询+下载）
 ├── optimize_glb.py         GLB 贴图压缩（4096 PNG → 2048 JPEG）
-├── simplify_glb.py         GLB 网格简化（顶点聚类，生成低模）
+├── simplify_qem.py         GLB 网格简化（QEM 边塌缩，保护 UV 缝与硬边）
 └── assets/
-    ├── dafeiyu.glb         网页用的模型（6.0 MB，15 万面）
-    ├── dafeiyu_50k.glb     简化版（2.6 MB，4.5 万面）
-    ├── dafeiyu_15k.glb     简化版（1.6 MB，1.5 万面）
-    ├── dafeiyu_5k.glb      简化版（1.1 MB，5 千面）
-    ├── dafeiyu_hires.glb   原始高模（25.8 MB，4096 贴图）
-    ├── dafeiyu_preview.png 服务端渲染的预览图
+    ├── dafeiyu_aim_15k.glb 网页用的模型（1.07 MB，14990 面，据枪瞄准版）
     ├── three.module.js     three.js r170（本地化，离线可用）
     └── addons/             OrbitControls / GLTFLoader / BufferGeometryUtils
 ```
 
-## 模型精度档位
+## 重要：三视图拼图不能用于图生3D
 
-页面右上角有 `150k / 45k / 15k / 5k` 四个按钮，可实时切换模型对比帧率。低模由 `simplify_glb.py` 的**顶点聚类**算法生成：
+**实测结论**：把正面/侧面/背面拼成一张整图提交，服务端会把**每一栏当成独立主体各生成一个角色**，而不是融合成一个 3D 角色 —— 结果是两三只大肥鱼并排站在同一个网格里。
+
+早期版本的 `dafeiyu_15k.glb` 就是这么来的（三只），已归档到 `assets/_archive/`。**要单角色模型，只能喂单栏图**。
+
+正确流程：
 
 ```bash
-python3 simplify_glb.py assets/dafeiyu.glb assets/dafeiyu_15k.glb --target 15000
+# 1) 从参考立绘裁出单栏（按空白列自动切栏 + 裁白边）
+python3 crop_single.py \
+  ../docs/08-美术资料/02-三视图参考/大肥鱼-据枪瞄准版.png \
+  assets/aim_src/front_aim.png 0        # 0 = 左起第一栏（正面）
+
+# 2) 提交图生3D，直出 15000 面（服务端直出，UV 连续，
+#    比本地简化更干净）
+python3 gen_model2.py <token文件> assets/aim_src/front_aim.png \
+  assets/aim_single 15000
+
+# 3) 体检面数与朝向（>15000 面会 exit 1，可直接当验收脚本）
+python3 glb_info.py assets/aim_single/dafeiyu.glb
+
+# 4) 无 GPU 环境确认朝向：渲染六视图，肉眼看接触表
+python3 render_views.py assets/aim_single/dafeiyu.glb assets/aim_src/views
+
+# 5) 贴图压缩后装进 assets/
+python3 optimize_glb.py assets/aim_single/dafeiyu.glb \
+  assets/dafeiyu_aim_15k.glb 2048 88
 ```
 
-原理：把模型空间按三维体素划分，同一体素内的顶点合并，并丢弃退化三角形；体素分辨率二分搜索以逼近目标面数。**UV 量化级数跟随体素分辨率**（否则 UV 桶比体素更细，聚类键永远唯一，等于没简化）。
-
-| 文件 | 顶点 | 三角面 | 体积 |
-| --- | --- | --- | --- |
-| `dafeiyu.glb` | 108,918 | 149,686 | 6.0 MB |
-| `dafeiyu_50k.glb` | 40,751 | 45,388 | 2.6 MB |
-| `dafeiyu_15k.glb` | 19,196 | 14,714 | 1.6 MB |
-| `dafeiyu_5k.glb` | 9,845 | 4,973 | 1.1 MB |
-
-四档的包围盒几乎一致（0.85 × 1.14 × 0.64），轮廓保持良好。
+> 凭证写在文件里传给脚本，**不要写进命令行**（会进 shell 历史与进程列表）。
+> `clientTempToken` 有效期约 30 分钟，401 就是过期，重新取一个写进文件即可。
 
 ## 模型信息
 
 | 项目 | 值 |
 | --- | --- |
-| 来源 | 图生 3D（以三视图裁切的正面图为参考） |
-| 面数 | 149,686 三角面 / 108,918 顶点 |
-| 材质 | 单材质，4096×4096 烘焙贴图（网页版已降为 2048×2048 JPEG） |
+| 来源 | 图生 3D（以据枪瞄准版立绘裁出的单栏正面图为参考） |
+| 姿势 | 据枪瞄准，正面对镜头，双手持 M4 |
+| 面数 | **14,990 三角面** / 13,607 顶点（≤ 15000 上限） |
+| 体积 | 1.07 MB（原始直出 16.86 MB，贴图压缩后） |
+| 材质 | 单材质，2048×2048 JPEG 烘焙贴图（原始 4096×4096） |
 | 朝向 | GLB 根节点自带绕 X 轴 +90° 旋转，GLTFLoader 自动应用后即为「头朝 +Y、正面朝 +Z」的站立姿态；页面**不再叠加任何姿态旋转**，只做落地居中 |
 | 缩放 | 页面加载时统一归一化到 1.72 单位高 |
 
+校验（Node + three r170 真实加载）：高度 1.720 / minY=0 / X 中心 0 / 根四元数 `(0.7071, 0, 0, 0.7071)`。
+
 ## 二次生成 / 换图
 
-```bash
-# 1) 裁一张参考图（>=128px，<=6MB）
-# 2) 提交图生3D
-python3 gen_model.py <token文件> assets/ref/front.jpg assets
-# 3) 若想用原图，重新压缩贴图
-python3 optimize_glb.py assets/dafeiyu_hires.glb assets/dafeiyu.glb 2048 88
-```
+见上面「重要：三视图拼图不能用于图生3D」的完整流程。
 
-注意：接口不允许同时传提示词和图片，`gen_model.py` 走的是纯图生3D（`prompt=""`）。
+注意：接口不允许同时传提示词和图片，`gen_model2.py` 走的是纯图生3D（`prompt=""`）。
+若新模型面数超了上限，用 `simplify_qem.py --target 15000` 做 QEM 边塌缩回收；
+顶点聚类方案（`simplify_glb.py`）会把 UV 量化成马赛克导致表面碎裂，不要用来做大幅简化。
 
 ## 性能参考
 
-15 万面单网格 + 单张贴图 + 阴影贴图 2042，中端独显笔记本可稳定 60fps。
+15k 面单网格 + 单张 2048 贴图 + 阴影贴图 2048，中端集显笔记本也能稳定 60fps。
 若要更低配置，可把 `index.html` 里的 `shadow.mapSize` 降到 1024，或进一步压缩贴图到 1024。
