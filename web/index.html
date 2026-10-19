@@ -458,8 +458,8 @@ scene.add(rig);
    旧版三只并排的模型就是这么来的。要单角色模型只能喂单栏图，
    所以这里用 docs/08-美术资料/02-三视图参考/大肥鱼-据枪瞄准版.png 裁出的正面栏
    （crop_single.py）直出。 */
-const MODEL_URL = './assets/dafeiyu_aim_15k.glb';
-const MODEL_LABEL = '15k · 据枪瞄准单图直出';
+const MODEL_URL = './assets/dafeiyu_long_skirt.glb';
+const MODEL_LABEL = '15k · 长裙（裙摆下拉）';
 const TARGET_H = 1.72;
 let model = null, wireframe = false, flipped = false;
 
@@ -826,6 +826,9 @@ function tick() {
      iso_test.mjs 用它断言「仰角恒为 35.26°、方位角恒为 45°」。 */
   window.__iso = {
     camera, controls, scene, grid, ground, ISO_DIR, renderer,
+    // 供离线脚本读取模型几何（顶点着色分类验证用）
+    get model() { return model; },
+    get rig() { return rig; },
     probe() {
       // 仰角用观察方向（target - camera），取-y 得到「抬头看」的仰角
       _look.copy(controls.target).sub(camera.position).normalize();
