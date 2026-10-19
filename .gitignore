@@ -48,3 +48,10 @@ web/iso_view.png
 
 # ---- 裙摆调试产物（正式模型已在 assets/）----
 web/assets/skirt/
+
+# 裙摆摆动的验证截图（可由 skirt_shots.mjs 重新生成）
+web/skirt_phase_*.png
+web/skirt_swing_strip.png
+web/skirt_view.png
+web/skirt_front_scale.png
+web/skirt_zones_*.png

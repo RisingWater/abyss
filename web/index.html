@@ -50,6 +50,9 @@
   #ctrl { top: 152px; left: 18px; padding: 12px 14px; width: 194px; }
   #ctrl .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; font-size: 13px; }
   #ctrl .row:last-child { margin-bottom: 0; }
+  #ctrl .row.col { flex-direction: column; align-items: stretch; gap: 7px; }
+  #ctrl .row.col label { font-size: 12px; color: var(--text-dim); display: flex; justify-content: space-between; }
+  #ctrl .row.col label b { color: var(--accent); font-weight: 500; font-variant-numeric: tabular-nums; }
   #ctrl label { cursor: pointer; user-select: none; }
   .switch { position: relative; width: 38px; height: 21px; flex: none; }
   .switch input { opacity: 0; width: 0; height: 0; }
@@ -63,6 +66,24 @@
   }
   input:checked + .slider { background: rgba(86, 214, 255, 0.55); }
   input:checked + .slider::before { transform: translateX(17px); }
+
+  /* 数值滑块（裙摆摆幅）：细杆 + 发光圆钮，和上面的开关同一套配色 */
+  .range { -webkit-appearance: none; appearance: none; width: 100%; height: 20px; background: transparent; cursor: pointer; }
+  .range::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 4px;
+    background: linear-gradient(90deg, rgba(86, 214, 255, .75) var(--fill, 50%), rgba(120, 160, 210, .22) var(--fill, 50%));
+  }
+  .range::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px;
+    border-radius: 50%; background: #dff3ff; border: 1px solid var(--accent);
+    box-shadow: 0 0 8px rgba(86, 214, 255, .75);
+  }
+  .range::-moz-range-track { height: 4px; border-radius: 4px; background: rgba(120, 160, 210, .22); }
+  .range::-moz-range-progress { height: 4px; border-radius: 4px; background: rgba(86, 214, 255, .75); }
+  .range::-moz-range-thumb {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #dff3ff; border: 1px solid var(--accent);
+  }
 
   #hud {
     right: 18px; bottom: 18px; padding: 9px 14px; font-size: 12px; color: var(--text-dim);
@@ -201,6 +222,10 @@
     <span class="switch"><input type="checkbox" id="tPerf" checked /><i class="slider"></i></span></div>
   <div class="row"><label for="tFlip">转身 180°</label>
     <span class="switch"><input type="checkbox" id="tFlip" /><i class="slider"></i></span></div>
+  <div class="row"><label for="tSkirt">裙摆摆动</label>
+    <span class="switch"><input type="checkbox" id="tSkirt" checked /><i class="slider"></i></span></div>
+  <div class="row col"><label for="rSkirt">摆动幅度 <b id="rSkirtV">1.00</b></label>
+    <input type="range" class="range" id="rSkirt" min="0" max="2" step="0.05" value="1" /></div>
 </div>
 
 <div id="hud" class="panel">坐标 X <span id="hx">0.0</span> · Z <span id="hz">0.0</span> · 状态 <span id="hs">待命</span></div>
@@ -485,6 +510,171 @@ function applyWireframe(on) {
   });
 }
 
+/* ---------- 裙摆摆动：顶点着色器程序化位移 ----------
+   模型是图生 3D 直出的静态单网格（skins=0 / animations=0），没有骨骼也没有走路动画，
+   所以「走路时裙摆甩动」不可能靠骨骼动画，只能在顶点着色器里按「离腰线的距离」做位移。
+   做法：加载后给几何体预计算三个自定义属性，每帧只改几个 uniform，CPU 侧零顶点开销。
+
+     aWeight 摆动权重：腰线 0 → 裙摆下摆 1；裙摆以下是腿和鞋，压到 0（不然鞋子会跟着平移）
+     aDelay  相位滞后：越靠下摆越滞后，走起来才有拖曳感
+     aOut    站立坐标系 xz 平面上的径向单位向量：摆动时裙摆略微外张
+
+   坐标坑：GLB 根节点自带 rotation=(0.7071,0,0,0.7071)（绕 X +90°），加载器已自动应用，
+   所以顶点属性里的原始坐标与「站立坐标」关系是 stand = (x, -z, y)：
+     站立 x（左右）= 属性 x
+     站立 y（竖直）= -属性 z
+     站立 z（前后）= 属性 y
+   位移算在站立坐标系里，写回属性时必须按 p + vec3(dx, dz, -dy) 映射回去。 */
+const SKIRT_GLSL = `
+attribute float aWeight;
+attribute float aDelay;
+attribute vec2  aOut;
+uniform float uPhase;
+uniform float uSide;
+uniform float uFlap;
+uniform float uFlare;
+uniform float uLift;
+uniform float uTurn;
+vec3 skirtSway(vec3 p) {
+  float w = aWeight;
+  if (w <= 0.001) return p;             // 腰线以上与腿鞋完全不动
+  float ph = uPhase - aDelay * 1.15;    // 下摆相位滞后
+  float s1 = sin(ph);                   // 主摆：一步一次左右重心转移
+  float s3 = sin(ph + 0.95);            // 前后甩：与侧摆错开约 55°
+  float s2 = sin(ph * 2.0 + 0.6);       // 二次谐波：布料细节
+  vec3 d;
+  d.x = (s1 * uSide + uTurn) * w;       // 左右
+  d.y = s1 * s1 * uLift * w;            // 竖直：只向上鼓（s1²≥0），向下会插进鞋里
+  d.z = (s3 * uFlap + s2 * uFlap * 0.25) * w;
+  d.xz += aOut * (abs(s1) * uFlare * w); // 径向外张
+  return p + vec3(d.x, d.z, -d.y);       // 站立 -> 属性 坐标映射
+}
+`;
+
+// 每帧更新的 uniform（同一个对象被普通材质与深度材质共用，改一处两边都生效）
+const skirtU = {
+  uPhase: { value: 0 },
+  uSide:  { value: 0 },
+  uFlap:  { value: 0 },
+  uFlare: { value: 0 },
+  uLift:  { value: 0 },
+  uTurn:  { value: 0 }
+};
+
+function patchSkirt(mat) {
+  mat.onBeforeCompile = shader => {
+    Object.assign(shader.uniforms, skirtU);   // 引用共享，改 value 即刻生效
+    // 声明插在源码最前面（three.js 的 prefixVertex 之后、main 之前），
+    // 不依赖 <common> 是否存在，深度材质也能正常注入
+    shader.vertexShader = SKIRT_GLSL + shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\n\ttransformed = skirtSway(transformed);'
+    );
+  };
+  // 注入过 onBeforeCompile 的材质必须给独立 cacheKey，否则会和未注入的版本共用同一个 program
+  mat.customProgramCacheKey = () => 'abyss-skirt-sway';
+  return mat;
+}
+
+/* 裙区判据（单位 = 模型原始单位，总高 1.051）。
+   阈值不是拍脑袋定的，是用web/skirt_zones.py 渲出「按高度+半径上色」的
+   正/侧视图肉眼确认的：
+   - 腰线必须取 0.30 而不是 lengthen_skirt.py 里当初用的 0.52。实测这段高度
+     （0.30~0.52）的顶点半径中位数是 0.26，而真正裙面稳定在 0.17 —— 那段是
+     垂到腰下的**头发**，不是裙子。腰线 0.30 约等于身高的 29%，与人体比例吻合。
+   - 半径门限 0.215：裙子是套在腿外的壳，超过这个半径的是头发/手臂/枪，
+     不能跟着裙摆一起甩。 */
+const SKIRT_WAIST = 0.30, SKIRT_HEM = 0.075, SKIRT_FADE = 0.045, SKIRT_R_MAX = 0.215;
+
+function buildSkirtAttrs(geo) {
+  const pos = geo.attributes.position;
+  if (!pos) return null;
+  const n = pos.count;
+  const aW = new Float32Array(n), aD = new Float32Array(n), aO = new Float32Array(n * 2);
+
+  // 身体轴：取下半身顶点的平均 (x, z)，径向方向要绕它算
+  let ax = 0, az = 0, cnt = 0;
+  for (let i = 0; i < n; i++) {
+    if (-pos.getZ(i) < 0.60) { ax += pos.getX(i); az += pos.getY(i); cnt++; }
+  }
+  if (!cnt) return null;
+  ax /= cnt; az /= cnt;
+
+  let inSkirt = 0;
+  for (let i = 0; i < n; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    const sy = -pos.getZ(i);                       // 站立高度
+    const rx = x - ax, rz = y - az;
+    const r = Math.hypot(rx, rz);
+    if (r > 1e-4) { aO[i * 2] = rx / r; aO[i * 2 + 1] = rz / r; }
+
+    // 半径超限 -> 头发/手臂/枪，权重直接 0
+    if (r > SKIRT_R_MAX || sy > SKIRT_WAIST || sy < SKIRT_HEM) {
+      aW[i] = 0; aD[i] = 0;
+      continue;
+    }
+    inSkirt++;
+    let t = (SKIRT_WAIST - sy) / (SKIRT_WAIST - SKIRT_HEM);
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    // 裙摆以下是腿和鞋：在 HEM-FADE 到 HEM 之间平滑压到 0，
+    // 直接 clamp 会让下摆顶点权重从 1 跳到 0，把裙子撕出一条硬边
+    const leg = Math.min(1, Math.max(0, (sy - (SKIRT_HEM - SKIRT_FADE)) / SKIRT_FADE));
+    t *= leg * leg * (3 - 2 * leg);
+    aW[i] = t * t * (3 - 2 * t);                   // smoothstep，权重变化更柔和
+    aD[i] = t;
+  }
+  geo.userData.skirtVerts = inSkirt;
+  geo.setAttribute('aWeight', new THREE.BufferAttribute(aW, 1));
+  geo.setAttribute('aDelay', new THREE.BufferAttribute(aD, 1));
+  geo.setAttribute('aOut', new THREE.BufferAttribute(aO, 2));
+  return geo;
+}
+
+/* 摆动状态（由 tick 驱动） */
+const SKIRT = {
+  on: true, gain: 0,      // gain: 0~1 平滑跟随移动状态，停下时裙摆自然收住
+  turn: 0, prevFacing: 0, amp: 1,
+  // 基础幅度（模型原始单位，×1.636 后是米）：横向 4.9cm / 前后 2.9cm / 外张 2cm / 上抬 3.6cm
+  side: 0.030, flap: 0.018, flare: 0.012, lift: 0.022
+};
+
+function updateSkirt(dt, moving, speedNow, facing, walkPhase) {
+  const target = SKIRT.on && moving ? 1 : 0;
+  SKIRT.gain += (target - SKIRT.gain) * Math.min(1, dt * 5.5);
+
+  // 转向甩动：绕竖直轴转身的惯性主要在左右方向（模型局部 x 恰是水平面内垂直于朝向的轴）。
+  // 快攻慢放 —— 转身瞬间甩出去，停转后缓慢回中。
+  const dF = Math.atan2(Math.sin(facing - SKIRT.prevFacing), Math.cos(facing - SKIRT.prevFacing));
+  SKIRT.prevFacing = facing;
+  const turnTarget = SKIRT.on ? -THREE.MathUtils.clamp(dF / Math.max(dt, 1e-3), -8, 8) * 0.010 : 0;
+  SKIRT.turn += (turnTarget - SKIRT.turn) * Math.min(1, dt * (Math.abs(turnTarget) > Math.abs(SKIRT.turn) ? 14 : 3.5));
+
+  const amp = SKIRT.gain * SKIRT.amp;
+  // 待机保留一点微风感，避免站定时裙子完全僵死。幅度必须远小于行走时的摆动
+  // （0.0015 vs 0.06，约 2.5%），否则一停下就看到裙子还在明显晃。
+  const idle = SKIRT.on ? (1 - SKIRT.gain) : 0;
+  // 走路用步频相位，停步时切到慢速呼吸相位：站定后裙子不会以跑步频率空摆
+  skirtU.uPhase.value = moving ? walkPhase : walkPhase * 0.55;
+  skirtU.uSide.value  = SKIRT.side * amp * 2 + idle * 0.0015 * Math.sin(walkPhase * 0.6);
+  skirtU.uFlap.value  = SKIRT.flap * amp * 2;
+  skirtU.uFlare.value = SKIRT.flare * amp * 2;
+  skirtU.uLift.value  = SKIRT.lift * amp * 2;
+  skirtU.uTurn.value  = SKIRT.turn * SKIRT.amp;
+}
+
+function applySkirt(obj) {
+  let n = 0;
+  obj.traverse(o => {
+    if (!o.isMesh) return;
+    if (buildSkirtAttrs(o.geometry)) n++;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => { if (m) patchSkirt(m); });
+    // 阴影用同一套位移，否则影子里的裙子会站着不动，一眼穿帮
+    o.customDepthMaterial = patchSkirt(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
+  });
+  return n;
+}
+
 const bar = document.querySelector('#bar > i');
 const errBox = document.getElementById('err');
 const loading = document.getElementById('loading');
@@ -514,6 +704,7 @@ function loadModel() {
       fitModel(model, TARGET_H);          // 必须在挂到 flipper 之前调用
       flipper.add(model);
       if (flipped) flipper.rotation.y = Math.PI;
+      const skirtMeshes = applySkirt(model);
       applyWireframe(document.getElementById('tWire').checked);
       bar.style.width = '100%';
       setTimeout(() => loading.classList.add('hide'), 260);
@@ -524,7 +715,7 @@ function loadModel() {
         tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
       });
       elTris.textContent = tris >= 1000 ? (tris / 1000).toFixed(0) + 'k' : String(Math.round(tris));
-      toast(`模型载入完成 · ${MODEL_LABEL} · ${(tris / 1000).toFixed(0)}k 面`);
+      toast(`模型载入完成 · ${MODEL_LABEL} · ${(tris / 1000).toFixed(0)}k 面 · 裙摆 ${skirtMeshes} 段`);
     },
     xhr => { if (xhr.total) bar.style.width = Math.min(99, (xhr.loaded / xhr.total) * 100) + '%'; },
     err => {
@@ -604,6 +795,23 @@ $('tFlip').addEventListener('change', e => {
   flipper.rotation.y = flipped ? Math.PI : 0;
   toast(flipped ? '模型转身 180°' : '模型朝向已复位');
 });
+
+$('tSkirt').addEventListener('change', e => {
+  SKIRT.on = e.target.checked;
+  if (!SKIRT.on) { skirtU.uTurn.value = 0; }     // 关掉时把转向残余甩动清零，别留一帧歪裙摆
+  toast(SKIRT.on ? '裙摆摆动：开' : '裙摆摆动：关');
+});
+
+// 幅度滑块：同时刷轨道填充色（::-webkit-slider-track 用 var(--fill) 做渐变分界）
+const rSkirt = $('rSkirt'), rSkirtV = $('rSkirtV');
+function syncSkirtSlider() {
+  const p = (rSkirt.value - rSkirt.min) / (rSkirt.max - rSkirt.min) * 100;
+  rSkirt.style.setProperty('--fill', p + '%');
+  rSkirtV.textContent = parseFloat(rSkirt.value).toFixed(2);
+  SKIRT.amp = parseFloat(rSkirt.value);
+}
+rSkirt.addEventListener('input', syncSkirtSlider);
+syncSkirtSlider();
 
 let toastTimer = 0;
 function toast(msg) {
@@ -793,6 +1001,9 @@ function tick() {
   lean.rotation.x = THREE.MathUtils.lerp(lean.rotation.x, moving ? amp * 0.1 : 0, dt * 8);
   lean.rotation.z = moving ? Math.sin(phase) * 0.035 * amp : 0;
 
+  /* 裙摆摆动：跟着走路相位走，停步时自然收住 */
+  updateSkirt(dt, moving, speedNow, facing, phase);
+
   /* 声呐环 */
   if (pulseT >= 0) {
     pulseT += dt;
@@ -829,6 +1040,66 @@ function tick() {
     // 供离线脚本读取模型几何（顶点着色分类验证用）
     get model() { return model; },
     get rig() { return rig; },
+    // 裙摆调试：skirt_test.mjs 用它读取 uniform 与权重属性，验证着色器真的在动
+    skirt: skirtU,
+    skirtState: SKIRT,
+    probeSkirt() {
+      const g = model && model.children.length ? null : null;
+      let w = null;
+      model && model.traverse(o => {
+        if (o.isMesh && o.geometry.attributes.aWeight && !w) {
+          const a = o.geometry.attributes.aWeight.array;
+          let mx = 0, sum = 0, nz = 0;
+          for (let i = 0; i < a.length; i++) { if (a[i] > mx) mx = a[i]; sum += a[i]; if (a[i] > 0.01) nz++; }
+          w = { max: +mx.toFixed(3), mean: +(sum / a.length).toFixed(3), moved: nz, total: a.length };
+        }
+      });
+      return {
+        gain: +SKIRT.gain.toFixed(3),
+        amp: SKIRT.amp, on: SKIRT.on,
+        u: Object.fromEntries(Object.entries(skirtU).map(([k, v]) => [k, +v.value.toFixed(4)])),
+        weight: w,
+        depthPatched: (() => {
+          let ok = false;
+          model && model.traverse(o => { if (o.isMesh && o.customDepthMaterial) ok = true; });
+          return ok;
+        })()
+      };
+    },
+    // 直接摆动：供自动化脚本注入确定相位，截图对比裙摆形态
+    forceWalk(on, ph) {
+      SKIRT.gain = on ? 1 : 0;
+      if (ph !== undefined) skirtU.uPhase.value = ph;
+    },
+    // 注入朝向增量。不能用 rig.rotation.y 测转向 —— tick() 每帧都会
+    // rig.rotation.y = facing 覆写它，直接改 rotation 根本不会产生 facing 变化。
+    turnBy(d) { facing += d; },
+    // 裙摆顶点在屏幕上的包围盒：截图比对要裁到这块区域才看得出摆动
+    skirtScreenBox(margin = 24) {
+      const w = innerWidth, h = innerHeight;
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, n = 0;
+      model && model.traverse(o => {
+        if (!o.isMesh || !o.geometry.attributes.aWeight) return;
+        o.updateWorldMatrix(true, false);
+        const g = o.geometry.attributes.position, a = o.geometry.attributes.aWeight;
+        const v = new THREE.Vector3();
+        for (let i = 0; i < a.count; i++) {
+          if (a.array[i] < 0.05) continue;
+          v.set(g.getX(i), g.getY(i), g.getZ(i)).applyMatrix4(o.matrixWorld).project(camera);
+          const sx = (v.x * 0.5 + 0.5) * w, sy = (-v.y * 0.5 + 0.5) * h;
+          if (sx < x0) x0 = sx; if (sx > x1) x1 = sx;
+          if (sy < y0) y0 = sy; if (sy > y1) y1 = sy;
+          n++;
+        }
+      });
+      if (!n) return null;
+      return {
+        x: Math.max(0, Math.round(x0 - margin)), y: Math.max(0, Math.round(y0 - margin)),
+        width: Math.round(Math.min(w, x1 + margin) - Math.max(0, x0 - margin)),
+        height: Math.round(Math.min(h, y1 + margin) - Math.max(0, y0 - margin)),
+        verts: n
+      };
+    },
     probe() {
       // 仰角用观察方向（target - camera），取-y 得到「抬头看」的仰角
       _look.copy(controls.target).sub(camera.position).normalize();
