@@ -89,6 +89,33 @@
   #perf.bad  b { color: #ff7a6b; }
   #perf.bad { border-color: rgba(255, 122, 107, .4); }
 
+  /* 诊断区：折叠式，默认收起，点标题才展开。用来判断瓶颈在GPU 还是页面逻辑 */
+  #diag { margin-top: 2px; border-top: 1px solid var(--line); padding-top: 8px; }
+  #perf.collapsed #diag { display: none; }
+  #diag > summary {
+    cursor: pointer; list-style: none; font-size: 11px; color: var(--text-dim);
+    letter-spacing: .5px; display: flex; align-items: center; gap: 5px;
+  }
+  #diag > summary::-webkit-details-marker { display: none; }
+  #diag > summary::before { content: "▸"; font-size: 9px; transition: transform .2s; }
+  #diag[open] > summary::before { transform: rotate(90deg); }
+  #diag > summary:hover { color: var(--accent); }
+  #diag dl {
+    margin: 8px 0 0; display: grid; grid-template-columns: auto 1fr;
+    gap: 3px 10px; font-size: 11px; line-height: 1.5;
+  }
+  #diag dt { color: var(--text-dim); white-space: nowrap; }
+  #diag dd {
+    margin: 0; color: #9fd0ff; word-break: break-all;
+    font-variant-numeric: tabular-nums;
+  }
+  #diag dd.warn { color: #ffb46b; }
+  /* 帧时间条：把最近 60 帧的耗时画成条形，比单个 FPS 数字更能看出抖动 */
+  #ft { grid-column: 1 / -1; display: flex; align-items: flex-end; gap: 1px; height: 26px; margin-top: 5px; }
+  #ft i { flex: 1 1 auto; min-width: 1px; background: var(--accent); border-radius: 1px 1px 0 0; opacity: .85; }
+  #ft i.over { background: #ff7a6b; }
+  #ft i.half { background: #ffc46b; }
+
   #loading {
     position: fixed; inset: 0; z-index: 20; display: flex;
     flex-direction: column; align-items: center; justify-content: center; gap: 16px;
@@ -175,10 +202,23 @@
 
 <div id="hud" class="panel">坐标 X <span id="hx">0.0</span> · Z <span id="hz">0.0</span> · 状态 <span id="hs">待命</span></div>
 
-<div id="perf" class="panel">
+<div id="perf" class="panel collapsed">
   <div class="kv"><b id="fps">--</b><span>FPS</span></div>
   <div class="kv"><b id="tris">--</b><span>三角面</span></div>
   <i id="perfmode">高性能</i>
+  <details id="diag">
+    <summary>诊断</summary>
+    <dl>
+      <dt>GPU</dt><dd id="dGPU">检测中…</dd>
+      <dt>渲染器</dt><dd id="dBackend">—</dd>
+      <dt>像素比</dt><dd id="dDPR">—</dd>
+      <dt>画布</dt><dd id="dSize">—</dd>
+      <dt>阴影</dt><dd id="dShadow">—</dd>
+      <dt>DrawCall</dt><dd id="dCalls">—</dd>
+      <dt>帧时间</dt><dd id="dFrame">—</dd>
+      <div id="ft"></div>
+    </dl>
+  </details>
 </div>
 
 <div id="stick"><i></i></div>
@@ -532,6 +572,94 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 1300);
 }
 
+/* ---------- 诊断面板 ----------
+   目的：一眼分清「机器/环境慢」还是「代码慢」。
+   最关键的一条是 GPU 字段：命中 SwiftShader / llvmpipe /软渲染关键词就标红，
+   说明当前是 CPU 软件光栅化，帧率低与模型和页面逻辑无关。 */
+const dGPU = $('dGPU'), dBackend = $('dBackend'), dDPR = $('dDPR');
+const dSize = $('dSize'), dShadow = $('dShadow'), dCalls = $('dCalls');
+const dFrame = $('dFrame'), ftBar = $('ft'), diagEl = $('diag');
+
+// 取 GPU 名称：WebGL2 已移除 gl.RENDERER 常量，必须逐级兜底。
+// 1) WEBGL_debug_renderer_info 扩展（最准，能绕过隐私遮蔽拿到真实型号）
+// 2) gl.getParameter(gl.RENDERER) （WebGL1 路径，新版可能为 null）
+// 3) 都拿不到时明确告诉用户「浏览器屏蔽了」，而不是显示"未知"让人误判
+(function initDiag() {
+  let vendor = '', renderer = '', how = '';
+  try {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    if (dbg) {
+      vendor = String(gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) || '');
+      renderer = String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '');
+      if (renderer) how = 'debug_renderer_info';
+    }
+    if (!renderer) {
+      renderer = String(gl.getParameter(gl.RENDERER) || '');
+      if (renderer) how = 'gl.RENDERER';
+    }
+    if (!vendor) vendor = String(gl.getParameter(gl.VENDOR) || '');
+    // 部分实现会返回 "WebKit"/"Mozilla" 这类无意义串，或被隐私策略替换成 "Google Inc."
+    if (/^(webkit|mozilla|google inc\.?)$/i.test(renderer)) renderer = '';
+    if (/^(webkit|mozilla|google inc\.?)$/i.test(vendor)) vendor = '';
+  } catch (e) { /* 拿不到就走下面的兜底提示 */ }
+
+  // 软件光栅化关键词：这些环境下 fps 低是硬件问题，不是代码问题
+  const SOFT = /swiftshader|llvmpipe|softwarerasterizer|software|mesa offscreen|virgl|basic render/i;
+  const isSoft = SOFT.test(renderer) || SOFT.test(vendor);
+  // 拿不到 GPU 名时给出可执行的判断依据，而不是干巴巴一个"未知"
+  if (renderer) {
+    dGPU.textContent = renderer + (isSoft ? ' · 软件渲染' : '');
+    if (isSoft) dGPU.className = 'warn';
+  } else {
+    dGPU.textContent = '浏览器未开放 GPU 信息';
+    dGPU.className = 'warn';
+  }
+  dBackend.textContent = vendor
+    ? vendor + (how ? '（' + how + '）' : '')
+    : (how ? '厂商未知（' + how + '）' : '不可用');
+
+  // 帧时间直方图：预建 60 个柱子，之后只改高度，不再频繁增删 DOM
+  for (let i = 0; i < 60; i++) ftBar.appendChild(document.createElement('i'));
+})();
+
+const ftBars = [...ftBar.children];
+const ftVals = new Array(60).fill(16.7);
+let ftIdx = 0;
+
+// 每帧记录帧时间并刷新直方图。renderer.info.render.calls 是 GPU 提交批次数，
+// 帧时间是一次 rAF 到下一次 rAF 的真实间隔 —— 两者配合能分清 GPU 瓶颈还是 CPU 瓶颈。
+let lastFrameStamp = performance.now();
+function recordFrame(now) {
+  // 诊断面板收起时不碰 DOM，省掉每帧几十次样式写入
+  if (!diagEl.open) { lastFrameStamp = now; return; }
+
+  const ms = now - lastFrameStamp;
+  lastFrameStamp = now;
+  if (ms <= 0 || ms > 500) return;      // 忽略切后台/断点造成的异常值
+  ftVals[ftIdx] = ms;
+  ftIdx = (ftIdx + 1) % 60;
+
+  // 刷新柱子：高度按 ms/33.3（30fps 帧时间）归一，绿=流畅 黄=略慢 红=>25fps
+  const SCALE = 33.3;
+  for (let i = 0; i < 60; i++) {
+    const v = ftVals[(ftIdx + i) % 60];
+    const bar = ftBars[i];
+    bar.style.height = Math.max(1, Math.min(26, (v / SCALE) * 26)) + 'px';
+    bar.className = v > 40 ? 'over' : v > 20 ? 'half' : '';
+  }
+  const avg = ftVals.reduce((a, b) => a + b, 0) / 60;
+  dFrame.textContent = avg.toFixed(1) + ' ms 均值';
+  dCalls.textContent = renderer.info.render.calls + ' 次';
+  dDPR.textContent = renderer.getPixelRatio().toFixed(2) + '×';
+  const sz = new THREE.Vector2();
+  renderer.getSize(sz);
+  dSize.textContent = Math.round(sz.x) + '×' + Math.round(sz.y);
+  dShadow.textContent = key.castShadow
+    ? key.shadow.mapSize.width + (key.shadow.map ? '' : ' (未渲染)')
+    : '关闭';
+}
+
 /* ---------- 主循环 ---------- */
 const SPEED = 3.1, SPRINT = 6.4, LIMIT = 17;
 const dir = new THREE.Vector2();
@@ -666,6 +794,9 @@ function tick() {
     perfPanel.classList.toggle('bad', fps < 25);
     fpsAcc = 0; fpsFrames = 0;
   }
+
+  /* 诊断：帧时间直方图 + 渲染负载（面板收起时内部直接 return，几乎零开销） */
+  recordFrame(performance.now());
 }
 
 addEventListener('resize', () => {

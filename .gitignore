@@ -13,6 +13,11 @@ web/.tmp_ck*
 __pycache__/
 *.pyc
 web/node_modules/
+web/npm/
+
+# 仅 diag_test.mjs（CDP 自动化验证）临时用得到，非项目依赖
+web/package.json
+web/package-lock.json
 
 # ---- 生成日志（含 job id，不含凭证但属运行产物）----
 web/*.log
