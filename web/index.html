@@ -89,9 +89,12 @@
   #perf.bad  b { color: #ff7a6b; }
   #perf.bad { border-color: rgba(255, 122, 107, .4); }
 
-  /* 诊断区：折叠式，默认收起，点标题才展开。用来判断瓶颈在GPU 还是页面逻辑 */
-  #diag { margin-top: 2px; border-top: 1px solid var(--line); padding-top: 8px; }
-  #perf.collapsed #diag { display: none; }
+  /* 诊断区：折叠式，点标题展开。用来判断瓶颈在 GPU 还是页面逻辑 */
+  /* 注意必须显式恢复 pointer-events —— 父级 #perf 是 none（防止挡视角），否则点不动 */
+  #diag {
+    margin-top: 2px; border-top: 1px solid var(--line); padding-top: 8px;
+    pointer-events: auto; cursor: pointer; user-select: text;
+  }
   #diag > summary {
     cursor: pointer; list-style: none; font-size: 11px; color: var(--text-dim);
     letter-spacing: .5px; display: flex; align-items: center; gap: 5px;
@@ -202,7 +205,7 @@
 
 <div id="hud" class="panel">坐标 X <span id="hx">0.0</span> · Z <span id="hz">0.0</span> · 状态 <span id="hs">待命</span></div>
 
-<div id="perf" class="panel collapsed">
+<div id="perf" class="panel">
   <div class="kv"><b id="fps">--</b><span>FPS</span></div>
   <div class="kv"><b id="tris">--</b><span>三角面</span></div>
   <i id="perfmode">高性能</i>
@@ -272,15 +275,22 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 /* ---------- 基础场景 ---------- */
 const container = document.getElementById('app');
 // 45° 等距视角参数（相机沿世界 (1,1,1) 方向看向角色）
-const ISO_OFFSET = 5.0;      // 水平/垂直方向等距偏移量
+// FOV 压到 30°：广角会强烈扭曲等距网格的平行线，接近正交投影的手感
+const ISO_FOV = 30;
+const ISO_DIST = 6.2;        // 相机与注视点的距离（缩放只改这个值，方向永不变）
 const ISO_TARGET_Y = 0.86;   // 视线目标高度（角色身高 1.72 的一半）
+// 等距方向单位向量：方位角 45°（看向 +X+Z），仰角 asin(1/√3)≈35.26°。
+// 这个向量是「视角锁定」的唯一真相来源——相机位置永远 = target + 该向量 × 距离。
+const ISO_DIR = new THREE.Vector3(1, 1, 1).normalize();
+// 锁死极角用的球坐标半径：cos(polar) = 竖直分量 = 1/√3 ≈ 0.5774
+const ISO_POLAR = Math.acos(ISO_DIR.y);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x070c15);
 scene.fog = new THREE.Fog(0x070c15, 34, 96);
 
-const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 200);
-// 45° 等距视角：偏移方向取世界 (1,1,1)（方位角 45°、仰角 35.26°）
-camera.position.set(ISO_OFFSET, ISO_TARGET_Y + ISO_OFFSET, ISO_OFFSET);
+const camera = new THREE.PerspectiveCamera(ISO_FOV, innerWidth / innerHeight, 0.1, 200);
+// 45° 等距视角：相机固定在 target + ISO_DIR × ISO_DIST，任何操作都不改变这个方向
+camera.position.copy(ISO_DIR).multiplyScalar(ISO_DIST).setY(ISO_DIR.y * ISO_DIST + ISO_TARGET_Y);
 
 const renderer = (() => {
   try {
@@ -332,12 +342,32 @@ function applyTier(name) {
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = false;         // 关闭阻尼：缩放/旋转立即到位，不做缓慢回弹
-controls.maxPolarAngle = Math.PI * 0.495;   // 不让相机钻到地面以下
-controls.minDistance = 1.2;
-controls.maxDistance = 40;          // 拉远上限（网格已放大到 120，远景不会看到边界）
+
+/* ---- 视角锁定：只允许改距离，方向永远锁在 45° 等距 ----
+   之前 enableRotate/enablePan 开着，左键拖拽和右键拖拽能把相机转到任意角度，
+   加上 maxPolarAngle 放到 0.495π（几乎垂直向下），于是视角会飘、还会变成俯视。
+   现在：旋转与平移关闭，极角与方位角锁死，每帧再强制把位置对齐到 ISO_DIR。 */
+controls.enableRotate = false;
+controls.enablePan = false;
+controls.minPolarAngle = ISO_POLAR;
+controls.maxPolarAngle = ISO_POLAR;
+controls.minAzimuthAngle = Math.PI / 4;      // 方位角也锁在45°（+X+Z）
+controls.maxAzimuthAngle = Math.PI / 4;
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null };
+controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_ROTATE };
+
+controls.minDistance = 2.6;
+controls.maxDistance = 15;          // 拉远上限（网格已放大到 120，远景不会看到边界）
 controls.zoomSpeed = 0.85;               // 滚轮缩放手感
-controls.rotateSpeed = 0.85;
 controls.target.set(0, ISO_TARGET_Y, 0);
+
+/* 视角锁定的兜底：无论谁改了 camera.position（跟随逻辑、重置、滚轮），
+   这一行都会把它拉回 target + ISO_DIR × dist，只保留距离。
+   必须在 controls.update() 之后调用，因为 update 会按自身球坐标重算位置。 */
+function lockIsoView() {
+  const dist = camera.position.distanceTo(controls.target) || ISO_DIST;
+  camera.position.copy(controls.target).addScaledVector(ISO_DIR, THREE.MathUtils.clamp(dist, controls.minDistance, controls.maxDistance));
+}
 
 /* ---------- 灯光 ---------- */
 scene.add(new THREE.HemisphereLight(0x9dc4ff, 0x101a2b, 0.75));
@@ -364,25 +394,36 @@ fill.position.set(-1.6, 1.6, 3.2);
 scene.add(fill);
 
 /* ---------- 地面 + 网格 ---------- */
-const GROUND_R = 60;                              // 地面/网格半径，随相机拉远范围一起放大
+/* 尺度必须匹配视距：ISO_DIST≈6.2、FOV 30° 时画面只覆盖约 3 米宽的地面。
+   网格跨度过大（原来 120 单位）时，远处的线要么落在视锥外，要么因为投影退化
+   挤成一条线，等于看不见。现在收到 12 单位、24 格（每格 0.5 米），
+   每格在屏幕上约 20~30 像素，网格清晰可辨又能看出移动参考。 */
+const GROUND_R = 14;                              // 地面/网格半径
 const ground = new THREE.Mesh(
   new THREE.CircleGeometry(GROUND_R, 72),
   new THREE.MeshStandardMaterial({ color: 0x0b1424, roughness: 0.94, metalness: 0.06 })
 );
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
+// 把地面往后退一点，避免与 y=0 处的网格线共面打架（z-fighting 会让网格被地面吞掉）
+ground.material.polygonOffset = true;
+ground.material.polygonOffsetFactor = 1;
+ground.material.polygonOffsetUnits = 1;
 scene.add(ground);
 
-const grid = new THREE.GridHelper(GROUND_R * 2, 60, 0x3d6f9e, 0x1e3350);
+/* 网格：24 格跨 12 单位 = 每格 0.5 米。
+   注意 GridHelper 的颜色烘在顶点色属性里，material.color 恒为 ffffff，改它无效。 */
+const grid = new THREE.GridHelper(12, 24, 0x7fb4e3, 0x3d6a92);
 grid.material.transparent = true;
-grid.material.opacity = 0.55;
+grid.material.opacity = 0.85;
+grid.position.y = 0.012;                // 抬离地面，避免与 y=0 共面 z-fighting
 scene.add(grid);
 
 // 主轴十字线，稍亮一些，方便判断朝向
 const axisMat = new THREE.LineBasicMaterial({ color: 0x59d3ff, transparent: true, opacity: 0.34 });
 const axisGeo = new THREE.BufferGeometry().setFromPoints([
-  new THREE.Vector3(-26, 0.012, 0), new THREE.Vector3(26, 0.012, 0),
-  new THREE.Vector3(0, 0.012, -26), new THREE.Vector3(0, 0.012, 26)
+  new THREE.Vector3(-5.9, 0.014, 0), new THREE.Vector3(5.9, 0.014, 0),
+  new THREE.Vector3(0, 0.014, -5.9), new THREE.Vector3(0, 0.014, 5.9)
 ]);
 scene.add(new THREE.LineSegments(axisGeo, axisMat));
 
@@ -546,8 +587,8 @@ if (isTouch) {
 
 function reset() {
   rig.position.set(0, 0, 0);
-  camera.position.set(ISO_OFFSET, ISO_TARGET_Y + ISO_OFFSET, ISO_OFFSET);
   controls.target.set(0, ISO_TARGET_Y, 0);
+  camera.position.copy(ISO_DIR).multiplyScalar(ISO_DIST).setY(ISO_DIR.y * ISO_DIST + ISO_TARGET_Y);
   toast('已重置位置');
 }
 
@@ -778,7 +819,25 @@ function tick() {
   }
 
   controls.update();
+  lockIsoView();      // 视角锁定：无论前面怎么改，方向永远回到 45° 等距
   renderer.render(scene, camera);
+
+  /* 调试钩子：把相机状态挂到 window，供无头浏览器自动化验证视角是否被锁死。
+     iso_test.mjs 用它断言「仰角恒为 35.26°、方位角恒为 45°」。 */
+  window.__iso = {
+    camera, controls, scene, grid, ground, ISO_DIR, renderer,
+    probe() {
+      // 仰角用观察方向（target - camera），取-y 得到「抬头看」的仰角
+      _look.copy(controls.target).sub(camera.position).normalize();
+      // 方位角用相机自身所在的象限（camera - target），这样 +X+Z 就是 +45°
+      const off = camera.position.clone().sub(controls.target);
+      return {
+        elev: Math.asin(-_look.y) * 180 / Math.PI,
+        azim: Math.atan2(off.x, off.z) * 180 / Math.PI,
+        dist: camera.position.distanceTo(controls.target)
+      };
+    }
+  };
 
   elHx.textContent = rig.position.x.toFixed(1);
   elHz.textContent = rig.position.z.toFixed(1);

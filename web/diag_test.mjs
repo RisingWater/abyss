@@ -1,18 +1,13 @@
-// 用 Chrome DevTools Protocol 驱动真实 Chrome 验证诊断面板。
-// 无头环境强制 SwiftShader 软渲染，正好能检验「软件渲染告警」这条逻辑。
-// 用法: node diag_test.mjs [port]
+// 验证诊断区：可见性（rect/display）、可点击性（hit-test 命中 summary）、字段是否有真实值
 import { spawn } from 'child_process';
 import http from 'http';
-import WS from 'ws';
 
-const PORT = process.argv[2] || '8903';
-const CDP = 9333;
+const CDP = 9223;
 const chrome = spawn('/usr/bin/google-chrome', [
-  '--headless=new', '--no-sandbox', '--disable-gpu-sandbox',
-  '--enable-unsafe-swiftshader',
-  '--use-gl=angle', '--use-angle=swiftshader',
+  '--headless=new', '--disable-gpu-sandbox', '--no-sandbox',
+  '--enable-unsafe-swiftshader', '--use-gl=angle', '--use-angle=swiftshader',
   '--window-size=1280,800', `--remote-debugging-port=${CDP}`,
-  '--user-data-dir=/tmp/cdp-prof-' + Date.now(), 'about:blank'
+  '--user-data-dir=/tmp/cdp-diag2', 'about:blank'
 ], { stdio: 'ignore' });
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -23,65 +18,78 @@ const getJSON = path => new Promise((res, rej) => {
 });
 
 try {
-  for (let i = 0; i < 60; i++) { try { await getJSON('/json/version'); break; } catch { await sleep(250); } }
+  for (let i = 0; i < 40; i++) { try { await getJSON('/json/version'); break; } catch { await sleep(250); } }
   const tabs = await getJSON('/json/list');
   const page = tabs.find(t => t.type === 'page');
+  const WS = (await import('ws')).default;
   const ws = new WS(page.webSocketDebuggerUrl, { perMessageDeflate: false });
   await new Promise(r => ws.on('open', r));
 
-  let id = 0; const pending = new Map(); const errs = [];
+  let id = 0; const pending = new Map();
+  const errs = [];
   ws.on('message', m => {
     const msg = JSON.parse(m);
-    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); return; }
-    if (msg.method === 'Runtime.exceptionThrown')
-      errs.push(msg.params.exceptionDetails.text + ' ' +
-                (msg.params.exceptionDetails.exception?.description || ''));
-    if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error')
-      errs.push('console.error: ' + msg.params.args.map(a => a.value).join(' '));
+    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+    if (msg.method === 'Runtime.exceptionThrown') errs.push(msg.params.exceptionDetails.text);
   });
   const send = (method, params = {}) => new Promise(r => {
-    const i = ++id; pending.set(i, r);
-    ws.send(JSON.stringify({ id: i, method, params }));
+    const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params }));
   });
   const evalJS = async expr => {
-    const r = await send('Runtime.evaluate',
-      { expression: expr, returnByValue: true, awaitPromise: true });
-    if (r.result?.exceptionDetails)
-      return '<<异常: ' + r.result.exceptionDetails.text + '>>';
+    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+    if (r.result?.exceptionDetails) return '__ERR__ ' + r.result.exceptionDetails.text;
     return r.result?.result?.value;
   };
 
   await send('Page.enable'); await send('Runtime.enable');
-  await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/index.html` });
-  await sleep(9000);   // 等 GLB 载入 + 跑几秒帧循环
+  await send('Page.navigate', { url: 'http://127.0.0.1:8903/index.html' });
+  await sleep(9000);
 
   console.log('=== 运行时错误 ===');
   console.log(errs.length ? errs.join('\n') : '(无)');
 
-  console.log('\n=== 性能仪表（折叠态） ===');
-  console.log('FPS      :', await evalJS('document.getElementById("fps").textContent'));
-  console.log('三角面   :', await evalJS('document.getElementById("tris").textContent'));
-  console.log('画质档位 :', await evalJS('document.getElementById("perfmode").textContent'));
-  console.log('折叠时诊断内容不可见:',
-    await evalJS('getComputedStyle(document.getElementById("diag")).display') === 'none' ? '是（零开销）' : '否');
+  console.log('\n=== 1. 收起态：诊断标题是否真的在屏幕上 ===');
+  console.log('summary 文本:', await evalJS('document.querySelector("#diag > summary").textContent'));
+  console.log('#perf 类名  :', await evalJS('document.getElementById("perf").className'));
+  const rect = await evalJS(`(() => {
+    const r = document.querySelector('#diag > summary').getBoundingClientRect();
+    return JSON.stringify({w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), right: Math.round(r.right)});
+  })()`);
+  console.log('summary 屏幕矩形:', rect, '(w/h > 0 才说明真的可见)');
 
-  console.log('\n=== 展开诊断面板 ===');
-  await evalJS('document.getElementById("diag").open = true');
-  await sleep(2000);
-  for (const [k, el] of [['GPU', 'dGPU'], ['渲染器', 'dBackend'], ['像素比', 'dDPR'],
-                          ['画布', 'dSize'], ['阴影', 'dShadow'],
-                          ['DrawCall', 'dCalls'], ['帧时间', 'dFrame']]) {
-    const v = await evalJS(`document.getElementById("${el}").textContent`);
-    const cls = await evalJS(`document.getElementById("${el}").className`);
-    console.log(k.padEnd(10) + ':', v, cls === 'warn' ? '  ⚠️ 软渲染告警已触发' : '');
+  console.log('\n=== 2. 可点击性：对 summary 中心点做 hit-test ===');
+  const hit = await evalJS(`(() => {
+    const s = document.querySelector('#diag > summary');
+    const r = s.getBoundingClientRect();
+    const el = document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);
+    return el ? (el.tagName + (el.closest('#diag') ? ' (命中诊断区内)' : ' (在诊断区外!)')) : 'null';
+  })()`);
+  console.log('命中元素:', hit);
+
+  console.log('\n=== 3. 真实点击展开（不用 JS 直接设 open）===');
+  await evalJS(`(() => {
+    const s = document.querySelector('#diag > summary');
+    s.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+  })()`);
+  await sleep(1200);
+  console.log('#diag.open:', await evalJS('document.getElementById("diag").open'));
+
+  console.log('\n=== 4. 各字段实际取值 ===');
+  for (const [k, id] of [['GPU','dGPU'],['渲染器','dBackend'],['像素比','dDPR'],['画布','dSize'],
+                          ['阴影','dShadow'],['DrawCall','dCalls'],['帧时间','dFrame']]) {
+    const v = await evalJS(`document.getElementById("${id}").textContent`);
+    const cls = await evalJS(`document.getElementById("${id}").className`);
+    console.log(('  ' + k).padEnd(12) + ':', String(v).padEnd(42), cls === 'warn' ? '⚠️ 警告' : '');
   }
-  const bars = await evalJS(
-    'document.querySelectorAll("#ft i").length + "/" + ' +
-    '[...document.querySelectorAll("#ft i")].filter(b=>b.style.height).length');
-  console.log('\n帧时间直方图(总/已赋值):', bars);
-  const sample = await evalJS(
-    '[...document.querySelectorAll("#ft i")].slice(0,5).map(b=>b.style.height).join(" ")');
-  console.log('前5根柱子高度:', sample);
+  console.log('直方图柱子  :', await evalJS('[...document.querySelectorAll("#ft i")].filter(b=>b.style.height).length'), '/ 60');
+  console.log('FPS         :', await evalJS('document.getElementById("fps").textContent'));
+
+  // 收起后应停止更新（零开销）
+  await evalJS('document.getElementById("diag").open = false');
+  const before = await evalJS('document.getElementById("dCalls").textContent');
+  await sleep(1200);
+  const after = await evalJS('document.getElementById("dCalls").textContent');
+  console.log('\n收起后 DrawCall 是否冻结:', before === after ? `是 (${before} 未变，零开销)` : `否 (${before}→${after})`);
 
   ws.close();
 } finally { chrome.kill(); }

@@ -37,3 +37,5 @@ web/assets/manifest.json
 web/assets/ref/
 web/assets/_ref/
 web/assets/*_preview.png
+# 截图产物（可由 shot.mjs 重新生成）
+web/iso_view.png
